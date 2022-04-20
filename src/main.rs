@@ -22,7 +22,6 @@ fn main() {
                 Err(Error::BufferUnderflow) => {}
                 Err(e) => Err(e).unwrap(),
             }
-            println!("len {}", messages.len() - before);
             page += 1;
         }
         if page > 1868 {
@@ -40,35 +39,16 @@ fn main() {
         })
         .collect();
 
-    println!(
-        "Max g load {}",
-        g_load
-            .iter()
-            .max_by(|a, b| a.partial_cmp(b).unwrap())
-            .unwrap()
-    );
-    println!(
-        "Min g load {}",
-        g_load
-            .iter()
-            .min_by(|a, b| a.partial_cmp(b).unwrap())
-            .unwrap()
-    );
+    let temp_p: Vec<_> = messages
+        .iter()
+        .filter_map(|s| match &s.data {
+            Data::BarometerData(d) => Some(d.pressure),
+            _ => None,
+        })
+        .collect();
 
-    println!(
-        "Min pressure {}",
-        pressures
-            .iter()
-            .min_by(|a, b| a.partial_cmp(b).unwrap())
-            .unwrap()
-    );
-    println!(
-        "Max pressure {}",
-        pressures
-            .iter()
-            .max_by(|a, b| a.partial_cmp(b).unwrap())
-            .unwrap()
-    );
+    //println!("{}", serde_json::to_string(&g_load).unwrap());
+    println!("{}", serde_json::to_string(&temp_p).unwrap());
 
     //let json = serde_json::to_string(&messages).unwrap();
     //println!("{}", json);
