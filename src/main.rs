@@ -1,15 +1,77 @@
 use std::error::Error as StdError;
 use std::fmt::Write;
+use std::io::Read;
 use thiserror::Error;
 
 use novafc_data_format::{BarometerData, Data, GyroData, HighGAccelerometerData, Message};
 
 fn main() {
-    let bytes = base64::decode(BASE64).unwrap();
+    let mut input = vec![];
+    let data = std::io::stdin().read_to_end(&mut input);
+    let input = String::from_utf8(input).unwrap();
     let mut messages = vec![];
-    let _ = read_page(&bytes, &mut messages);
-    let json = serde_json::to_string(&messages).unwrap();
-    println!("JSON: {}", json);
+    let mut page = 64;
+    let mut pressures = vec![];
+    for (i, line) in input.lines().enumerate() {
+        //Sikp short lines
+        if line.len() > 500 {
+            let bytes = base64::decode(line).unwrap();
+            let before = messages.len();
+            match read_page(&bytes, &mut messages, &mut pressures) {
+                Ok(()) => {}
+                Err(Error::BufferUnderflow) => {}
+                Err(e) => Err(e).unwrap(),
+            }
+            println!("len {}", messages.len() - before);
+            page += 1;
+        }
+        if page > 1868 {
+            break;
+        }
+    }
+    let g_load: Vec<_> = messages
+        .iter()
+        .filter_map(|s| match &s.data {
+            Data::HighGAccelerometerData(d) => {
+                let squared = d.x * d.x + d.y * d.y + d.z * d.z;
+                Some(squared.sqrt())
+            }
+            _ => None,
+        })
+        .collect();
+
+    println!(
+        "Max g load {}",
+        g_load
+            .iter()
+            .max_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap()
+    );
+    println!(
+        "Min g load {}",
+        g_load
+            .iter()
+            .min_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap()
+    );
+
+    println!(
+        "Min pressure {}",
+        pressures
+            .iter()
+            .min_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap()
+    );
+    println!(
+        "Max pressure {}",
+        pressures
+            .iter()
+            .max_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap()
+    );
+
+    //let json = serde_json::to_string(&messages).unwrap();
+    //println!("{}", json);
 }
 
 #[derive(Error, Debug)]
@@ -23,7 +85,7 @@ enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-fn read_page(bytes: &[u8], messages: &mut Vec<Message>) -> Result<()> {
+fn read_page(bytes: &[u8], messages: &mut Vec<Message>, pressures: &mut Vec<f64>) -> Result<()> {
     let mut d = Decoder {
         data: bytes.to_owned(),
         offset: 0,
@@ -40,21 +102,31 @@ fn read_page(bytes: &[u8], messages: &mut Vec<Message>) -> Result<()> {
                     let x = d.read_little_i16()?;
                     let y = d.read_little_i16()?;
                     let z = d.read_little_i16()?;
+                    // +-6 g mode
+                    let raw_gyro_to_g = 6.0 / i16::MAX as f64;
+                    let x = x as f64 * raw_gyro_to_g;
+                    let y = y as f64 * raw_gyro_to_g;
+                    let z = z as f64 * raw_gyro_to_g;
                     messages.push(Message {
                         ticks_since_last_message: 1,
-                        data: Data::HighGAccelerometerData(HighGAccelerometerData { x: x, y, z }),
+                        data: Data::HighGAccelerometerData(HighGAccelerometerData { x, y, z }),
                     });
-                    println!("Found accel data {} {} {}", x, y, z);
+                    // Looks like accel data is using the +-6g setting, so 1g = a raw value of 5460
+                    //println!("Found accel data [{} {} {}]g", x, y, z);
                 }
                 b'B' => {
-                    let temp = d.read_little_i32()?;
-                    let pressure = d.read_little_i32()?;
-                    println!("Found pressure {} {}", temp, pressure);
+                    let raw_temp = d.read_little_i32()?;
+                    //The sensor gives pascals already
+                    let pressure_pascal = d.read_little_i32()? as f64;
+                    let temp_c = raw_temp as f64 / 100.0;
+                    let temp_k = temp_c + 273.15;
+                    pressures.push(pressure_pascal);
+                    //println!("Found pressure {}Pa temp: {}C", pressure_pascal, temp_c);
                     messages.push(Message {
                         ticks_since_last_message: 1,
                         data: Data::BarometerData(BarometerData {
-                            temprature: temp as u32,
-                            pressure: pressure as u32,
+                            temprature: temp_k,
+                            pressure: pressure_pascal,
                         }),
                     });
                 }
@@ -62,18 +134,24 @@ fn read_page(bytes: &[u8], messages: &mut Vec<Message>) -> Result<()> {
                     let x = d.read_little_i16()?;
                     let y = d.read_little_i16()?;
                     let z = d.read_little_i16()?;
-                    println!("Found gyro data {} {} {}", x, y, z);
+                    // 2000 degree per second mode
+                    // map +32767 to +2000 and -32767 to -2000
+                    let raw_gyro_to_g = 2000.0 / i16::MAX as f64;
+                    let x = x as f64 * raw_gyro_to_g;
+                    let y = y as f64 * raw_gyro_to_g;
+                    let z = z as f64 * raw_gyro_to_g;
+                    //println!("Found gyro data [{} {} {}] degree / second", x, y, z);
                     messages.push(Message {
                         ticks_since_last_message: 1,
                         data: Data::GyroData(GyroData { x, y, z }),
                     });
                 }
                 c => {
-                    println!("Two of {} ({}) found! Bad", c as char, c);
+                    panic!("Two of {} ({}) found! Bad", c as char, c);
                 }
             },
             Ok(None) => {
-                println!("Ignoring different char");
+                panic!("Ignoring different char");
             }
             Err(e) => return Ok(()),
         }
@@ -153,5 +231,3 @@ impl Decoder {
         }
     }
 }
-
-static BASE64: &str = "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";
